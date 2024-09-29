@@ -3,3 +3,4 @@ project(ThreadPool VERSION 0.1.0 LANGUAGES C CXX)
 
 add_executable(ThreadPool example.cpp)
 
+add_subdirectory(net)
