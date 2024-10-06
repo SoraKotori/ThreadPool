@@ -1,5 +1,3 @@
-cmake_minimum_required(VERSION 3.14)
-
 include(FetchContent)
 
 # 使用 FetchContent 下載 ASIO

@@ -1,7 +1,6 @@
-cmake_minimum_required(VERSION 3.5.0)
-project(ThreadPool VERSION 0.1.0 LANGUAGES C CXX)
+cmake_minimum_required(VERSION 3.14)
+project(async VERSION 0.1.0)
 
-add_executable(ThreadPool example.cpp)
-
+add_subdirectory(thread_pool)
 add_subdirectory(net)
 add_subdirectory(coroutine)
