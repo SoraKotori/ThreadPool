@@ -11,21 +11,25 @@
 #include <cassert>
 
 #include <sys/socket.h>
-#include <netdb.h>
-
 #include <sys/epoll.h>
+#include <netdb.h>
 
 class file_descriptor : public std::optional<int>
 {
 public:
-    file_descriptor(int fd) :
-        std::optional<int>(std::in_place, fd) {}
+    using Base = std::optional<int>;
+
+    explicit file_descriptor(int fd) :
+        Base(std::in_place, fd) {}
 
     ~file_descriptor()
     {
-        if (std::optional<int>::operator bool())
-            if (::close(std::optional<int>::operator*()) == -1)
-                std::cerr << std::error_code(errno, std::system_category());
+        if (Base::has_value())
+            if (::close(Base::value()) == -1)
+            {
+                std::error_code error(errno, std::system_category());
+                std::cerr << error << ' ' << error.message() << '\n';
+            }
     }
 
     file_descriptor(const file_descriptor&) = delete;
@@ -34,18 +38,24 @@ public:
     file_descriptor(file_descriptor&& other)
     {
         // a moved-from std::optional still contains a value, but the value itself is moved from.
-        std::optional<int>::swap(other);
-    }
-
-    operator int&()
-    {
-        return std::optional<int>::operator*();
+        Base::swap(other);
     }
 };
 
 class epoll
 {
+private:
+    epoll(int epfd) :
+        m_epfd(epfd) {}
+
+    file_descriptor m_epfd;
+    std::map<file_descriptor, void*, std::less<file_descriptor::Base>> m_fds;
+
 public:
+    using iterator = typename decltype(m_fds)::iterator;
+    using key_type = typename decltype(m_fds)::key_type;
+    using mapped_type = typename decltype(m_fds)::mapped_type;
+
     static std::expected<epoll, std::error_code> create()
     {
         int epfd = ::epoll_create1(0);
@@ -56,16 +66,33 @@ public:
         return epoll(epfd);
     }
 
-    epoll(epoll&& other) noexcept :
-        m_epfd(other.m_epfd),
-        m_fds(std::move(other.m_fds))
+    auto erase(iterator it)
     {
-        other.m_epfd = -1; // 將原對象的文件描述符設置為無效
+        if (::epoll_ctl(*m_epfd, EPOLL_CTL_DEL, *it->first, nullptr) == -1)
+            std::cerr << std::error_code(errno, std::system_category());
+
+        // The iterator pos must be valid and dereferenceable.
+        // return iterator following the last removed element.
+        m_fds.erase(it);
     }
 
-    auto insert_or_close(file_descriptor fd, struct epoll_event& event)
+    auto insert(file_descriptor fd, uint32_t event_flag, mapped_type mapped)
     {
-        if (::epoll_ctl(m_epfd, EPOLL_CTL_ADD, fd, &event) == -1)
+        auto pair = m_fds.try_emplace(std::move(fd), std::move(mapped));
+        if (!pair.second)
+        {
+            std::cerr << "m_fds.try_emplace Number of fd inserted: 0\n";
+
+            return false;
+        }
+        
+        static_assert(sizeof(pair.first) == sizeof(epoll_data_t));
+        struct epoll_event event = {
+            .events = event_flag,
+            .data = { .ptr = *reinterpret_cast<void**>(&pair.first) }
+        };
+
+        if (::epoll_ctl(*m_epfd, EPOLL_CTL_ADD, *fd, &event) == -1)
         {
             std::cerr << std::error_code(errno, std::system_category());
             // std::println(std::cerr, "epoll_ctl: {}.", std::strerror(errno));
@@ -73,57 +100,36 @@ public:
             return false;
         }
 
-        auto [iterator, is_inserted] = m_fds.try_emplace(int(fd), nullptr);
-        if (!is_inserted)
-        {
-            std::cerr << "m_fds.try_emplace Number of fd inserted: 0.\n";
-
-            return false;
-        }
-
-        fd.reset();
-        return is_inserted;
-    }
-
-    auto erase_and_close(int fd)
-    {
-        if (::epoll_ctl(m_epfd, EPOLL_CTL_DEL, fd, nullptr) == -1)
-            std::cerr << std::error_code(errno, std::system_category());
-
-        if (::close(fd) == -1)
-            std::cerr << std::error_code(errno, std::system_category());
-
-        if (auto is_removed = m_fds.erase(fd); !is_removed)
-            std::cerr << "m_fds.erase Number of fd removed: 0.\n";
+        return pair.second;
     }
 
     std::expected<bool, std::error_code> listen(const char *__restrict name,
-			                                     const char *__restrict service,
-			                                     const struct addrinfo *__restrict req,
-                                                 int backlog)
+			                                    const char *__restrict service,
+			                                    const struct addrinfo *__restrict req,
+                                                int backlog)
     {
         std::unique_ptr<addrinfo, decltype(&::freeaddrinfo)> result(nullptr, ::freeaddrinfo);
 
         // getaddrinfo() returns 0 if it succeeds, or the nonzero error codes
         if (int status = ::getaddrinfo(name, service, req, std::out_ptr(result)))
         {
-            std::println(std::cerr, "getaddrinfo: {}.", ::gai_strerror(status)); // !
+            std::println(std::cerr, "getaddrinfo: {}", ::gai_strerror(status)); // !
             return std::unexpected(std::error_code(status, std::system_category())); // !
         }
 
         for (auto result_ptr = result.get(); result_ptr; result_ptr = result_ptr->ai_next)
         {
             // AF_INET is 2, AF_INET6 is 10
-            file_descriptor listen_fd = ::socket(result_ptr->ai_family,
-                                                 result_ptr->ai_socktype,
-                                                 result_ptr->ai_protocol);
-            if (listen_fd == -1)
+            file_descriptor listen_fd(::socket(result_ptr->ai_family,
+                                               result_ptr->ai_socktype,
+                                               result_ptr->ai_protocol));
+            if (*listen_fd == -1)
             {
                 std::cerr << std::error_code(errno, std::system_category());
                 continue;
             }
 
-            if (::bind(listen_fd, result_ptr->ai_addr,
+            if (::bind(*listen_fd, result_ptr->ai_addr,
                                   result_ptr->ai_addrlen) == -1)
             {
                 std::cerr << std::error_code(errno, std::system_category());
@@ -132,7 +138,7 @@ public:
                 continue;
             }
 
-            if (::listen(listen_fd, backlog) == -1)
+            if (::listen(*listen_fd, backlog) == -1)
             {
                 std::cerr << std::error_code(errno, std::system_category());
                 // std::println(std::cerr, "listen: {}.", std::strerror(errno));
@@ -140,13 +146,8 @@ public:
                 continue;
             }
 
-            struct epoll_event event = {
-                .events = EPOLLIN,
-                .data = { .fd = listen_fd }
-            };
-
-            // Transfer ownership of listen_fd to the insert_or_close function.
-            insert_or_close(std::move(listen_fd), event);
+            // Transfer ownership of listen_fd to the insert function.
+            insert(std::move(listen_fd), EPOLLIN, {});
 
             // listen_fd is now empty after the ownership has been moved
             assert(!listen_fd.has_value());
@@ -155,27 +156,37 @@ public:
         return true;
     }
 
-    std::expected<bool, std::error_code> wait(std::vector<struct epoll_event> events, int timeout)
+    std::expected<bool, std::error_code> wait(std::vector<struct epoll_event>& events, int timeout)
     {
-        int events_size = ::epoll_wait(m_epfd, std::data(events), std::size(events), timeout);
+        int events_size = ::epoll_wait(*m_epfd, std::data(events), std::size(events), timeout);
         if (events_size == -1)
             return std::unexpected(std::error_code(errno, std::system_category()));
 
         for (int events_index = 0; events_index < events_size; events_index++)
         {
+            // warning: taking address of packed member of 'epoll_event' may result in an unaligned pointer value
+            iterator it = *reinterpret_cast<iterator*>(&events[events_index].data.ptr);
+
             auto event_flag = events[events_index].events;
-            auto socket_fd  = events[events_index].data.fd;
+            auto socket_fd = *it->first;
+
+            std::println(std::clog, "event_flag: {}", event_flag);
 
             if (event_flag & EPOLLERR)
             {
-                std::println(std::cerr, "EPOLLERR, fd: {}.", socket_fd);
+                std::println(std::cerr, "EPOLLERR, fd: {}", socket_fd);
                 continue;
             }
 
-            if (event_flag != EPOLLIN)
+            if (event_flag & EPOLLHUP)
             {
-                std::println(std::clog, "event_flag != EPOLLIN: {}.", event_flag);
+                erase(it);
                 continue;
+            }
+
+            if (event_flag & EPOLLRDHUP)
+            {
+                shutdown(socket_fd, SHUT_WR);
             }
 
             int is_listen;
@@ -183,7 +194,7 @@ public:
             if (::getsockopt(socket_fd, SOL_SOCKET, SO_ACCEPTCONN, &is_listen, &len) == -1)
             {
                 std::cerr << std::error_code(errno, std::system_category());
-                // std::println(std::cout, "getsockopt: {}.", std::strerror(errno));
+                // std::println(std::cout, "getsockopt: {}", std::strerror(errno));
                 continue;
             }
 
@@ -193,11 +204,11 @@ public:
                 sockaddr& addr = reinterpret_cast<sockaddr&>(addr_storage);
                 socklen_t addr_len = sizeof(sockaddr_storage);
 
-                int accept_fd = ::accept(socket_fd, &addr, &addr_len);
+                file_descriptor accept_fd(::accept(socket_fd, &addr, &addr_len));
                 if (accept_fd == -1)
                 {
                     std::cerr << std::error_code(errno, std::system_category());
-                    // std::println(std::cerr, "accept: {}.", std::strerror(errno));
+                    // std::println(std::cerr, "accept: {}", std::strerror(errno));
                     continue;
                 }
 
@@ -207,19 +218,14 @@ public:
                                                std::data(receive_host), std::size(receive_host),
                                                std::data(receive_port), std::size(receive_port), 0))
                 {
-                    std::println(std::cerr, "getnameinfo: {}.", gai_strerror(status));
+                    std::println(std::cerr, "getnameinfo: {}", gai_strerror(status));
                     continue;
                 }
 
                 // print host and port
-                std::println(std::clog, "accept from {}:{}.", std::data(receive_host), std::data(receive_port));
+                std::println(std::clog, "accept from {}:{}", std::data(receive_host), std::data(receive_port));
 
-                struct epoll_event event = {
-                    .events = EPOLLIN | EPOLLRDHUP,
-                    .data = { .fd = accept_fd }
-                };
-
-                insert_or_close(accept_fd, event);
+                insert(std::move(accept_fd), EPOLLIN | EPOLLRDHUP, {});
             }
             else // accept socket
             {
@@ -235,42 +241,20 @@ public:
 
                 if (receive_size == 0)
                 {
-                    erase_and_close(socket_fd);
+                    std::println(std::clog, "receive_size: 0");
                     continue;
                 }
 
+                std::string_view receive{std::data(buffer), static_cast<std::size_t>(receive_size)};
+                std::print(std::clog, "receive_size: {}, {}", receive_size, receive);
+
                 if (receive_size != ::send(socket_fd, std::data(buffer), receive_size, 0))
                     std::println(std::cerr, "Error sending response");
-                    
-                std::string_view receive{std::data(buffer), static_cast<std::size_t>(receive_size)};
-                std::println(std::clog, "{}", receive);
             }
-
-            if (event_flag == EPOLLHUP ||
-                event_flag == EPOLLRDHUP)
-                erase_and_close(socket_fd);
         }
 
         return true;
     }
-
-    ~epoll()
-    {
-        if (m_epfd != -1)
-            if (::close(m_epfd) == -1)
-                std::cerr << std::error_code(errno, std::system_category());
-
-        for (auto [fd, ptr] : m_fds)
-            if (::close(fd) == -1)
-                std::cerr << std::error_code(errno, std::system_category());
-    }
-
-private:
-    epoll(int epfd) :
-        m_epfd(epfd) {}
-
-    int m_epfd;
-    std::map<int, void*> m_fds;
 };
 
 int main(int argc, char* argv[])
