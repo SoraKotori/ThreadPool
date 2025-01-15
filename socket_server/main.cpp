@@ -14,6 +14,12 @@
 #include <sys/epoll.h>
 #include <netdb.h>
 
+template<typename CharT, typename Traits>
+auto print_error_message(std::basic_ostream<CharT, Traits>& os, const std::error_code& error)
+{
+    os << error << ',' << error.message() << '\n';
+}
+
 class file_descriptor : public std::optional<int>
 {
 public:
@@ -26,10 +32,7 @@ public:
     {
         if (Base::has_value())
             if (::close(Base::value()) == -1)
-            {
-                std::error_code error(errno, std::system_category());
-                std::cerr << error << ' ' << error.message() << '\n';
-            }
+                print_error_message(std::cerr, std::error_code(errno, std::system_category()));
     }
 
     file_descriptor(const file_descriptor&) = delete;
@@ -69,38 +72,39 @@ public:
     auto erase(iterator it)
     {
         if (::epoll_ctl(*m_epfd, EPOLL_CTL_DEL, *it->first, nullptr) == -1)
-            std::cerr << std::error_code(errno, std::system_category());
+            print_error_message(std::cerr, std::error_code(errno, std::system_category()));
 
         // The iterator pos must be valid and dereferenceable.
         // return iterator following the last removed element.
-        m_fds.erase(it);
+        return m_fds.erase(it);
     }
 
-    auto insert(file_descriptor fd, uint32_t event_flag, mapped_type mapped)
+    auto try_emplace(uint32_t event_flag, file_descriptor fd, mapped_type mapped)
     {
-        auto pair = m_fds.try_emplace(std::move(fd), std::move(mapped));
-        if (!pair.second)
+        auto it_inserted = m_fds.try_emplace(std::move(fd), std::move(mapped));
+        if (!it_inserted.second)
         {
             std::cerr << "m_fds.try_emplace Number of fd inserted: 0\n";
 
-            return false;
+            return it_inserted;
         }
         
-        static_assert(sizeof(pair.first) == sizeof(epoll_data_t));
+        static_assert(sizeof(it_inserted.first) == sizeof(epoll_data_t));
         struct epoll_event event = {
             .events = event_flag,
-            .data = { .ptr = *reinterpret_cast<void**>(&pair.first) }
+            .data = { .ptr = *reinterpret_cast<void**>(&it_inserted.first) }
         };
 
         if (::epoll_ctl(*m_epfd, EPOLL_CTL_ADD, *fd, &event) == -1)
         {
-            std::cerr << std::error_code(errno, std::system_category());
+            print_error_message(std::cerr, std::error_code(errno, std::system_category()));
             // std::println(std::cerr, "epoll_ctl: {}.", std::strerror(errno));
 
-            return false;
+            it_inserted.first = erase(it_inserted.first);
+            it_inserted.second = false;
         }
 
-        return pair.second;
+        return it_inserted;
     }
 
     std::expected<bool, std::error_code> listen(const char *__restrict name,
@@ -119,35 +123,31 @@ public:
 
         for (auto result_ptr = result.get(); result_ptr; result_ptr = result_ptr->ai_next)
         {
-            // AF_INET is 2, AF_INET6 is 10
+            // ai_family: AF_INET is 2, AF_INET6 is 10
             file_descriptor listen_fd(::socket(result_ptr->ai_family,
                                                result_ptr->ai_socktype,
                                                result_ptr->ai_protocol));
             if (*listen_fd == -1)
             {
-                std::cerr << std::error_code(errno, std::system_category());
+                print_error_message(std::cerr, std::error_code(errno, std::system_category()));
                 continue;
             }
 
             if (::bind(*listen_fd, result_ptr->ai_addr,
-                                  result_ptr->ai_addrlen) == -1)
+                                   result_ptr->ai_addrlen) == -1)
             {
-                std::cerr << std::error_code(errno, std::system_category());
-                // std::println(std::cerr, "bind: {}.", std::strerror(errno));
-
+                print_error_message(std::cerr, std::error_code(errno, std::system_category()));
                 continue;
             }
 
             if (::listen(*listen_fd, backlog) == -1)
             {
-                std::cerr << std::error_code(errno, std::system_category());
-                // std::println(std::cerr, "listen: {}.", std::strerror(errno));
-
+                print_error_message(std::cerr, std::error_code(errno, std::system_category()));
                 continue;
             }
 
-            // Transfer ownership of listen_fd to the insert function.
-            insert(std::move(listen_fd), EPOLLIN, {});
+            // Transfer ownership of listen_fd to the try_emplace function.
+            try_emplace(EPOLLIN, std::move(listen_fd), {});
 
             // listen_fd is now empty after the ownership has been moved
             assert(!listen_fd.has_value());
@@ -186,15 +186,15 @@ public:
 
             if (event_flag & EPOLLRDHUP)
             {
-                shutdown(socket_fd, SHUT_WR);
+                if (::shutdown(socket_fd, SHUT_WR) == -1)
+                    print_error_message(std::cerr, std::error_code(errno, std::system_category()));
             }
 
             int is_listen;
             socklen_t len = sizeof(is_listen);
             if (::getsockopt(socket_fd, SOL_SOCKET, SO_ACCEPTCONN, &is_listen, &len) == -1)
             {
-                std::cerr << std::error_code(errno, std::system_category());
-                // std::println(std::cout, "getsockopt: {}", std::strerror(errno));
+                print_error_message(std::cerr, std::error_code(errno, std::system_category()));
                 continue;
             }
 
@@ -225,7 +225,7 @@ public:
                 // print host and port
                 std::println(std::clog, "accept from {}:{}", std::data(receive_host), std::data(receive_port));
 
-                insert(std::move(accept_fd), EPOLLIN | EPOLLRDHUP, {});
+                try_emplace(EPOLLIN | EPOLLRDHUP, std::move(accept_fd), {});
             }
             else // accept socket
             {
@@ -234,8 +234,7 @@ public:
                 auto receive_size = ::recv(socket_fd, std::data(buffer), std::size(buffer), 0);
                 if (receive_size == -1)
                 {
-                    std::cerr << std::error_code(errno, std::system_category());
-                    // std::println(std::cerr, "recv error: {}.", errno, std::strerror(errno));
+                    print_error_message(std::cerr, std::error_code(errno, std::system_category()));
                     continue;
                 }
 

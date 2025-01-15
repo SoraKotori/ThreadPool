@@ -2,17 +2,19 @@
     "version": 8,
     "configurePresets": [
         {
-            "name": "Debug",
-            "displayName": "使用工具鏈檔案設定預設",
-            "description": "設定 Ninja 產生器、建置和安裝目錄",
+            "name": "Default",
             "generator": "Ninja",
-            "binaryDir": "${sourceDir}/build/${presetName}",
+            "hidden": true,
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Debug",
-                "CMAKE_TOOLCHAIN_FILE": "",
-                "CMAKE_INSTALL_PREFIX": "${sourceDir}/install/${presetName}",
                 "CMAKE_C_COMPILER": "gcc-14",
                 "CMAKE_CXX_COMPILER": "g++-14"
+            }
+        },
+        {
+            "name": "Debug",
+            "inherits": "Default",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug"
             }
         }
     ]
