@@ -4,6 +4,9 @@
 		"dockerfile": "Dockerfile",
         "target": "development"
 	},
+    "runArgs": [
+        "--security-opt=seccomp=unconfined" // io_uring
+    ],
 	"customizations": {
 		"vscode": {
 			"extensions": [
