@@ -8,6 +8,10 @@ RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
     && apt-get -y install --no-install-recommends \
     gcc-14 g++-14
 
+RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
+    && apt-get -y install --no-install-recommends \
+    liburing-dev # io_uring
+    
 FROM base AS development
 
 RUN apt-get update && export DEBIAN_FRONTEND=noninteractive && \

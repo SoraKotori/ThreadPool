@@ -1,8 +1,6 @@
 project(io_uring)
 
-add_executable(io_uring
-    main.cpp)
+add_executable(io_uring main.cpp)
 
-set_target_properties(io_uring PROPERTIES
-CXX_STANDARD 23
-CXX_STANDARD_REQUIRED YES)
+target_compile_features(io_uring PRIVATE cxx_std_23)
+target_link_libraries  (io_uring PRIVATE uring)

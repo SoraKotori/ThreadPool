@@ -1,5 +1,1 @@
-.devcontainer/reinstall-cmake.sh
-.github
-
 build
-install
