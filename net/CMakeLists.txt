@@ -9,14 +9,12 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(asio)
 
 # 添加您的源文件
-add_executable(MyApp main.cpp)
+add_executable(net main.cpp)
 
-# 使用 set_target_properties 設定 C++ 標準
-set_target_properties(MyApp PROPERTIES
-    CXX_STANDARD 23
-    CXX_STANDARD_REQUIRED YES)
+# 使用 target_compile_features 設定 C++ 標準
+target_compile_features(net PRIVATE cxx_std_23)
 
-target_include_directories(MyApp PUBLIC ${asio_SOURCE_DIR}/asio/include)
+target_include_directories(net PUBLIC ${asio_SOURCE_DIR}/asio/include)
 
 # 設定 target
 # target_link_libraries(MyApp PRIVATE pthread)

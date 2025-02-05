@@ -1,8 +1,5 @@
 project(socket_client)
 
-add_executable(socket_client
-    main.cpp)
+add_executable(socket_client main.cpp)
 
-set_target_properties(socket_client PROPERTIES
-CXX_STANDARD 23
-CXX_STANDARD_REQUIRED YES)
+target_compile_features(socket_client PRIVATE cxx_std_23)
